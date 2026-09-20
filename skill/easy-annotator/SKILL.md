@@ -11,6 +11,7 @@ Self-hosted notes on HTML. Config is one field: `domain`. Derive:
 - api = `{domain}/annotations.php`
 - page = `{domain}/index.php?name={slug}`
 - comments: GET + POST reply, no token
+- scope: automatic, nothing to configure — origin + parent folder of the page (`/SoraHub/dashboard.html` and the extensionless `/SoraHub/templates` both group under `/SoraHub/`). Override only for nested/mixed paths, same snippet on every page (`data-scope="/SoraHub/"` or `window.ANNOTATOR_SCOPE`)
 - HTML PUT token (optional, only to upload pages): env `ANNOTATOR_AI_TOKEN`, or `host/anno-data/.ai-token` if this checkout has `host/`
 
 This git repo has two trees. **Never upload the whole repo to PHP hosting.**
@@ -95,6 +96,26 @@ python3 -c 'import json,sys; print(json.loads(sys.argv[1])["url"])' "$RESP"
 
 Comments key off that exact URL. After a human-facing edit, PUT again to the same `name`.
 
+## Cross-page scope (no IDs)
+
+Notes group by origin + folder automatically. A review split over `dashboard.html` and `templates.html` in one folder is already one group, and pages uploaded here land at `{domain}/index.php?name={slug}` (one folder). Keep the same embed snippet on every page; do not invent per-page custom IDs.
+
+Panel (Alt+N): **This page** / **All pages**, with the group path as the label. Notes from other pages show their page title and path with **Open on page** — clicking opens that page, opens the panel, scrolls to the note, and flashes the pin. Reply, edit, Done, and delete happen on the note's own page only.
+
+Override only when pages belong to one review but sit in different folders (nested or mixed paths). Same snippet everywhere, resolved against the page URL; a bare `/SoraHub` normalizes to `/SoraHub/`, and `./` / `../` are relative to the page:
+
+```html
+<script src="{domain}/index.php" data-scope="/SoraHub/"></script>
+```
+
+Or the global, which must come before the embed:
+
+```html
+<script>window.ANNOTATOR_SCOPE = "/SoraHub/";</script>
+```
+
+`window.ANNOTATOR_SCOPE` (set before the embed) wins over `data-scope`. The value must be a containing same-origin directory prefix — same origin and port, the page's path under the scope's directory (the directory URL itself, with or without its slash, counts) — otherwise **All pages** cannot load. It replaces per-page custom IDs: one field on a shared footer/include.
+
 ## Comments (AI)
 
 AI may **read** and **reply**. Do not edit or delete a human comment. Do not mark Done.
@@ -104,12 +125,19 @@ DOMAIN=$(python3 -c 'import json; print(json.load(open("annotator.config.json"))
 API="$DOMAIN/annotations.php"
 PAGE_URL="$DOMAIN/index.php?name=my-slug"
 
+# One page
 curl -sS "$API?url=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$PAGE_URL")"
+
+# Whole scope (the panel's All pages): every in-scope page in one request
+SCOPE="$DOMAIN/"   # default group = origin + folder of PAGE_URL; or an explicit containing path
+curl -sS "$API?url=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$PAGE_URL")&scope=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$SCOPE")"
 
 curl -sS -X POST "$API?url=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$PAGE_URL")&action=reply&id=A01" \
   -H "Content-Type: application/json" \
   -d '{"text":"Updated the headline on slide 2","author":"AI"}'
 ```
+
+`scope` returns `{ "v": 3, "scope": "…", "pages": [ { "url": …, "page": { "title": … }, "annotations": [ … ] } ] }`, sorted by page URL. Read all notes in one pass, then reply per page: each annotation keeps its own `links.reply` pointing at its source page, so POST with that page's `url`, never the scope URL. `scope` must contain `url` — same origin and port, directory prefix — otherwise the API returns 400 `url is outside scope`. Omit `scope` for a single page.
 
 ## Do not
 

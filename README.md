@@ -106,6 +106,45 @@ Source in this repo: `skill/easy-annotator/`.
 
 Select text → + Note. Pin icon → click a menu, button, or shape. Click image → pin. Drag on image → region. Alt+N panel. Esc closes the popover, then Pin mode, then the panel. **AI** copies a reply prompt (no token in the clipboard). Edit only your notes. Resolve on replies. AI reads and replies only. Ids: `A01`…`A99`, then `B01`.
 
+## Notes across pages (no setup)
+
+Notes group by **origin + folder**, automatically. Sibling pages share one group, so no page needs its own ID:
+
+| Page | Group |
+|---|---|
+| `https://x.example.com/SoraHub/dashboard.html` | `https://x.example.com/SoraHub/` |
+| `https://x.example.com/SoraHub/templates.html` | `https://x.example.com/SoraHub/` |
+| `https://x.example.com/SoraHub/templates` (extensionless route) | `https://x.example.com/SoraHub/` |
+| `https://x.example.com/SoraHub/sub/` | `https://x.example.com/SoraHub/sub/` |
+| `https://x.example.com/SoraHub2/dashboard.html` | `https://x.example.com/SoraHub2/` |
+
+Different host, port, or `http` vs `https` never mixes. A path ending in `/` is already a folder.
+
+In the panel (Alt+N), the buttons switch the list:
+
+- **This page** — notes for the current URL only.
+- **All pages** — notes from every page in the group; the label next to the buttons shows the group path.
+
+A note from another page shows its page title and path with **Open on page**. Click it to go there: that page opens, the panel scrolls to the note, and the pin or highlight flashes. Reply, edit, Done, and delete stay on the note's own page.
+
+Uploaded pages are `{domain}/index.php?name={slug}`, all in one folder, so one **All pages** list already covers the whole install.
+
+### Optional override (nested or mixed paths)
+
+Use one shared snippet on every page when pages belong to one review but sit in different folders. It replaces per-page custom IDs: one field, same embed everywhere.
+
+```html
+<script src="https://YOUR_HOST/easy-annotator/index.php" data-scope="/SoraHub/"></script>
+```
+
+Or set the global before the embed script:
+
+```html
+<script>window.ANNOTATOR_SCOPE = "/SoraHub/";</script>
+```
+
+`window.ANNOTATOR_SCOPE` wins over `data-scope`: set the global before the embed; `data-scope` lives on the embed tag. The value is resolved against the page URL (`/SoraHub/`, `/SoraHub`, `./`, `../`, or a full URL), then normalized with a trailing slash. It must contain the page URL — same origin and port, page path under the scope's directory (the directory URL itself, with or without its slash, counts). An override that does not contain the page leaves **All pages** unable to load, and a value that is not an `http`/`https` URL is ignored. Leave it out when the folder default already fits.
+
 ## Hosting (once)
 
 1. Upload the **contents** of `host/` to a public PHP folder.

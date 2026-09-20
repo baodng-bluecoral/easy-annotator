@@ -106,6 +106,45 @@ Gốc trong repo này: `skill/easy-annotator/`.
 
 Bôi chữ → + Note. Icon Pin → click menu, nút, hoặc shape. Click ảnh → ghim. Kéo ảnh → vùng. Alt+N panel. Esc đóng popover, rồi Pin mode, rồi panel. Nút **AI** copy prompt reply (không nhét token vào clipboard). Chỉ sửa note của mình. Resolve trên reply. AI chỉ đọc và reply. Id: `A01`…`A99`, rồi `B01`.
 
+## Ghi chú giữa các trang (không cần cấu hình)
+
+Note tự gom theo **origin + thư mục**. Trang cùng thư mục dùng chung một nhóm, không trang nào cần ID riêng:
+
+| Trang | Nhóm |
+|---|---|
+| `https://x.example.com/SoraHub/dashboard.html` | `https://x.example.com/SoraHub/` |
+| `https://x.example.com/SoraHub/templates.html` | `https://x.example.com/SoraHub/` |
+| `https://x.example.com/SoraHub/templates` (route không có đuôi) | `https://x.example.com/SoraHub/` |
+| `https://x.example.com/SoraHub/sub/` | `https://x.example.com/SoraHub/sub/` |
+| `https://x.example.com/SoraHub2/dashboard.html` | `https://x.example.com/SoraHub2/` |
+
+Khác host, khác port, hoặc `http` với `https` thì không trộn. Đường dẫn kết thúc bằng `/` vốn đã là một thư mục.
+
+Trong panel (Alt+N), hai nút đổi danh sách:
+
+- **This page** — chỉ note của URL hiện tại.
+- **All pages** — note của mọi trang trong nhóm; nhãn cạnh hai nút hiện đường dẫn nhóm.
+
+Note của trang khác hiện tiêu đề và đường dẫn trang kèm **Open on page**. Click để sang đó: trang đó mở ra, panel cuộn tới note, ghim hoặc highlight nháy sáng. Reply, sửa, Done và xóa vẫn ở trang của note.
+
+Trang upload nằm ở `{domain}/index.php?name={slug}`, cùng một thư mục, nên một danh sách **All pages** đã bao trọn bản cài.
+
+### Ghi đè tùy chọn (đường dẫn lồng nhau hoặc khác thư mục)
+
+Dùng chung một snippet trên mọi trang khi các trang thuộc cùng một đợt review nhưng nằm khác thư mục. Nó thay cho ID riêng từng trang: một field, cùng một embed ở mọi trang.
+
+```html
+<script src="https://YOUR_HOST/easy-annotator/index.php" data-scope="/SoraHub/"></script>
+```
+
+Hoặc đặt global trước thẻ script embed:
+
+```html
+<script>window.ANNOTATOR_SCOPE = "/SoraHub/";</script>
+```
+
+`window.ANNOTATOR_SCOPE` thắng `data-scope`: đặt global trước thẻ embed; `data-scope` nằm trên thẻ embed. Giá trị được resolve theo URL trang (`/SoraHub/`, `/SoraHub`, `./`, `../`, hoặc URL đầy đủ), rồi chuẩn hóa có `/` ở cuối. Nó phải chứa URL trang — cùng origin và port, đường dẫn trang nằm trong thư mục của scope (chính URL thư mục đó, có hay không có `/` đều tính). Ghi đè không chứa trang thì **All pages** không tải được, và giá trị không phải URL `http`/`https` sẽ bị bỏ qua. Hợp thư mục mặc định rồi thì cứ để trống.
+
 ## Hosting (một lần)
 
 1. Upload **nội dung** `host/` lên folder PHP public.

@@ -47,6 +47,26 @@ function bc_owns($row, $ownerKey) {
     return $ownerKey !== '' && $row['ownerId'] === $ownerKey;
 }
 
+function bc_mark_mine($doc, $ownerKey) {
+    $doc = is_array($doc) ? $doc : array();
+    $list = isset($doc['annotations']) && is_array($doc['annotations']) ? $doc['annotations'] : array();
+    foreach ($list as $i => $a) {
+        if (!is_array($a)) {
+            continue;
+        }
+        $list[$i]['mine'] = bc_owns($a, $ownerKey);
+        $replies = isset($a['replies']) && is_array($a['replies']) ? $a['replies'] : array();
+        foreach ($replies as $ri => $r) {
+            if (is_array($r)) {
+                $replies[$ri]['mine'] = bc_owns($r, $ownerKey);
+            }
+        }
+        $list[$i]['replies'] = $replies;
+    }
+    $doc['annotations'] = $list;
+    return $doc;
+}
+
 function bc_ai_ok($got, $expected) {
     if ($expected === '' || $got === '') {
         return false;
@@ -463,5 +483,128 @@ function bc_purge_old_json($dir, $maxAgeSec, $now) {
             $out['skipped']++;
         }
     }
+    return $out;
+}
+
+/* URL scope grouping: a scope is an absolute origin + directory path ending in "/".
+   An incoming scope value is a directory prefix (/SoraHub → /SoraHub/); a file
+   url keeps its directory. Membership needs the same scheme/host/port and a
+   path-prefix boundary; the bare directory url (no trailing slash) counts too. */
+
+function bc_url_parts($url) {
+    $url = trim((string) $url);
+    if ($url === '' || strlen($url) > 2000) {
+        return null;
+    }
+    if (!preg_match('#^https?://#i', $url)) {
+        return null;
+    }
+    $p = @parse_url($url);
+    if (!is_array($p) || empty($p['host'])) {
+        return null;
+    }
+    if (isset($p['user']) || isset($p['pass'])) {
+        return null;
+    }
+    $scheme = strtolower((string) $p['scheme']);
+    if ($scheme !== 'http' && $scheme !== 'https') {
+        return null;
+    }
+    $port = isset($p['port']) ? (int) $p['port'] : 0;
+    $def = $scheme === 'https' ? 443 : 80;
+    if ($port === $def) {
+        $port = 0;
+    }
+    $path = isset($p['path']) && $p['path'] !== '' ? (string) $p['path'] : '/';
+    return array(
+        'scheme' => $scheme,
+        'host' => strtolower((string) $p['host']),
+        'port' => $port,
+        'path' => $path,
+    );
+}
+
+function bc_url_origin($parts) {
+    return $parts['scheme'] . '://' . $parts['host'] . ($parts['port'] ? ':' . $parts['port'] : '');
+}
+
+/* Explicit scope value → directory prefix: /SoraHub becomes /SoraHub/, a file
+   url keeps its directory. */
+function bc_scope_dir($path) {
+    $path = (string) $path;
+    if ($path === '') {
+        return '/';
+    }
+    if (substr($path, -1) === '/') {
+        return $path;
+    }
+    $slash = strrpos($path, '/');
+    $last = $slash === false ? $path : substr($path, $slash + 1);
+    if ($slash === false || strpos($last, '.') === false) {
+        return $path . '/';
+    }
+    return substr($path, 0, $slash + 1);
+}
+
+function bc_scope_normalize($url) {
+    $p = bc_url_parts($url);
+    if ($p === null) {
+        return '';
+    }
+    return bc_url_origin($p) . bc_scope_dir($p['path']);
+}
+
+function bc_scope_allows($scope, $pageUrl) {
+    $s = bc_url_parts($scope);
+    $g = bc_url_parts($pageUrl);
+    if ($s === null || $g === null) {
+        return false;
+    }
+    if (bc_url_origin($s) !== bc_url_origin($g)) {
+        return false;
+    }
+    $dir = bc_scope_dir($s['path']);
+    $bare = rtrim($dir, '/');
+    if ($bare !== '' && $g['path'] === $bare) {
+        return true;
+    }
+    return strpos($g['path'], $dir) === 0;
+}
+
+function bc_scope_aggregate($dir, $scope, $ownerKey, $apiBase) {
+    $out = array('v' => 3, 'scope' => $scope, 'pages' => array());
+    $files = glob(rtrim((string) $dir, '/') . '/*.json');
+    if (!is_array($files)) {
+        return $out;
+    }
+    $pages = array();
+    foreach ($files as $f) {
+        if (!bc_is_page_json($f)) {
+            continue;
+        }
+        $raw = @file_get_contents($f);
+        if (!is_string($raw) || $raw === '') {
+            continue;
+        }
+        $doc = json_decode($raw, true);
+        if (!is_array($doc) || !isset($doc['page']['url'])) {
+            continue;
+        }
+        $pageUrl = trim((string) $doc['page']['url']);
+        if ($pageUrl === '' || !bc_scope_allows($scope, $pageUrl)) {
+            continue;
+        }
+        $pub = bc_public_doc(bc_mark_mine($doc, $ownerKey), $apiBase, $pageUrl);
+        $pages[] = array(
+            'url' => $pageUrl,
+            'page' => $pub['page'],
+            'annotations' => $pub['annotations'],
+            'links' => $pub['links'],
+        );
+    }
+    usort($pages, function ($a, $b) {
+        return strcmp($a['url'], $b['url']);
+    });
+    $out['pages'] = $pages;
     return $out;
 }

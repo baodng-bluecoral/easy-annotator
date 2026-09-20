@@ -1,6 +1,7 @@
 <?php
 /* bc-annotator PHP backend v3
    GET  annotations.php?url=<pageUrl>
+   GET  annotations.php?url=<pageUrl>&scope=<scopeUrl>  (public notes for the scope)
    PUT  annotations.php?url=<pageUrl>  JSON body + header X-Owner-Key (ACL merge)
    POST annotations.php?url=<pageUrl>&action=reply&id=<pubId>
         human: X-Owner-Key | AI: JSON body, optional Bearer
@@ -94,22 +95,22 @@ if (!file_exists($ht)) {
 $file = $dir . '/' . sha1($url) . '.json';
 $method = $_SERVER['REQUEST_METHOD'];
 
-if ($method === 'GET') {
-    $doc = bc_load_doc($file, $url);
-    $owner = bc_owner_header();
-    foreach ($doc['annotations'] as $i => $a) {
-        if (!is_array($a)) {
-            continue;
-        }
-        $doc['annotations'][$i]['mine'] = bc_owns($a, $owner);
-        $replies = isset($a['replies']) && is_array($a['replies']) ? $a['replies'] : array();
-        foreach ($replies as $ri => $r) {
-            if (is_array($r)) {
-                $replies[$ri]['mine'] = bc_owns($r, $owner);
-            }
-        }
-        $doc['annotations'][$i]['replies'] = $replies;
+$scopeRaw = isset($_GET['scope']) ? (string) $_GET['scope'] : '';
+if ($method === 'GET' && $scopeRaw !== '') {
+    $scope = bc_scope_normalize($scopeRaw);
+    if ($scope === '') {
+        fail(400, 'invalid scope param');
     }
+    if (!bc_scope_allows($scope, $url)) {
+        fail(400, 'url is outside scope');
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(bc_scope_aggregate($dir, $scope, bc_owner_header(), bc_self_api()));
+    exit;
+}
+
+if ($method === 'GET') {
+    $doc = bc_mark_mine(bc_load_doc($file, $url), bc_owner_header());
     $out = bc_public_doc($doc, bc_self_api(), $url);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode($out);

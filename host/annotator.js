@@ -3,6 +3,8 @@
    SPDX-License-Identifier: GPL-3.0-or-later
    API is inferred from the script URL (index.php or annotator.js → annotations.php).
    optional override: window.ANNOTATOR_API="https://host/annotations.php"
+   notes group by the page directory (/SoraHub/dashboard and /SoraHub/templates
+   share /SoraHub/); optional override: window.ANNOTATOR_SCOPE="/SoraHub/"
    AI reply: POST $API?url=&action=reply&id=A01  JSON {"text":"...","author":"AI"}
    HTML PUT still uses Bearer (anno-data/.ai-token). no API = localStorage mode. */
 (function(root){
@@ -334,6 +336,71 @@ Model.apiFromScriptSrc = function(src){
   return null;
 };
 
+/* Directory that holds a page path: /a/b.html and the clean route /a/b both
+   live in /a/; a path that already ends in "/" is its own directory. */
+Model.dirPath = function(path){
+  var p=String(path==null?'':path);
+  if(!p) return '/';
+  if(p.charAt(p.length-1)==='/') return p;
+  var i=p.lastIndexOf('/');
+  return i<0?'/':p.slice(0,i+1);
+};
+/* Explicit scope value (window.ANNOTATOR_SCOPE / data-scope) is a directory
+   prefix: /SoraHub normalizes to /SoraHub/, a file url keeps its directory. */
+Model.scopeDir = function(path){
+  var p=String(path==null?'':path);
+  if(!p) return '/';
+  if(p.charAt(p.length-1)==='/') return p;
+  var i=p.lastIndexOf('/');
+  var last=i<0?p:p.slice(i+1);
+  if(i<0||last.indexOf('.')<0) return p+'/';
+  return p.slice(0,i+1);
+};
+Model.urlParts = function(url, baseHref){
+  var s=String(url==null?'':url).trim();
+  if(!s) return null;
+  var u;
+  try{u=new URL(s, baseHref||undefined);}catch(e){return null;}
+  if(u.protocol!=='http:'&&u.protocol!=='https:') return null;
+  return {origin:u.origin, path:u.pathname||'/', dir:Model.dirPath(u.pathname)};
+};
+Model.scopePrefix = function(url, baseHref){
+  var u=Model.urlParts(url, baseHref);
+  return u?u.origin+Model.scopeDir(u.path):'';
+};
+/* Without baseHref: automatic scope of a page url (its own directory).
+   With baseHref: the override value resolved against the page, kept as a
+   directory prefix. */
+Model.scopeOf = function(url, baseHref){
+  if(baseHref) return Model.scopePrefix(url, baseHref);
+  var u=Model.urlParts(url);
+  return u?u.origin+u.dir:'';
+};
+Model.scopeContains = function(scope, url){
+  var s=Model.urlParts(scope), u=Model.urlParts(url);
+  if(!s||!u||s.origin!==u.origin) return false;
+  var dir=Model.scopeDir(s.path);
+  var bare=dir.length>1?dir.slice(0,-1):'';
+  if(bare&&u.path===bare) return true;
+  return u.path.indexOf(dir)===0;
+};
+Model.scopeLabel = function(scope){
+  var s=Model.urlParts(scope);
+  return s?Model.scopeDir(s.path):String(scope==null?'':scope);
+};
+Model.pageLabel = function(url, scope){
+  var u=Model.urlParts(url);
+  if(!u) return String(url==null?'':url);
+  var s=Model.urlParts(scope);
+  var dir=s&&s.origin===u.origin?Model.scopeDir(s.path):null;
+  if(dir&&u.path.indexOf(dir)===0) return u.path.slice(dir.length)||u.path;
+  return u.path;
+};
+Model.sameDoc = function(a, b){
+  if(!a||!b) return false;
+  return String(a).split('#')[0]===String(b).split('#')[0];
+};
+
 if(typeof module!=='undefined'&&module.exports){
   module.exports=Model;
 }
@@ -341,8 +408,12 @@ if(typeof document==='undefined') return;
 
 if(root.__bcAnnotator) return; root.__bcAnnotator=true;
 
-var API=root.ANNOTATOR_API||Model.apiFromScriptSrc(document.currentScript&&document.currentScript.src)||null;
+var scriptEl=document.currentScript||null;
+var API=root.ANNOTATOR_API||Model.apiFromScriptSrc(scriptEl&&scriptEl.src)||null;
+var scopeCfg=null;
+try{scopeCfg=root.ANNOTATOR_SCOPE||(scriptEl&&scriptEl.getAttribute?scriptEl.getAttribute('data-scope'):null)||null;}catch(x){}
 var docKey=location.href.split('#')[0];
+var scope=Model.scopeOf(scopeCfg, location.href)||Model.scopeOf(location.href);
 var STORE_KEY='bcAnno:'+docKey;
 var UI_KEY='bcAnno:ui';
 var OWNER_KEY='bcAnno:ownerKey';
@@ -350,6 +421,8 @@ var HL='bc-anno-hl';
 var annos=[], deletedIds=[];
 var index=null,norm=null,lastText=null;
 var currentTab='open';
+var displayMode='page';
+var scopeData=null,scopeLoading=false,scopeErr=false;
 var editPopover=null,selButton=null,toastEl=null;
 var imgDrag=null,dragBox=null,skipTextSel=false;
 var pinDrag=null,pinMoved=false;
@@ -387,6 +460,12 @@ function isMine(a){
 }
 function apiUrl(){
   return API+(API.indexOf('?')>-1?'&':'?')+'url='+encodeURIComponent(docKey);
+}
+function scopeApiUrl(){
+  return apiUrl()+'&scope='+encodeURIComponent(scope);
+}
+function jumpKey(url){
+  return 'bcAnno:jump:'+String(url||'').split('#')[0];
 }
 function apiHeaders(json){
   var h={'X-Owner-Key':ownerKey()};
@@ -776,6 +855,16 @@ function injectStyle(){
   '.bc-anno-ft-i svg{display:block;width:16px;height:16px;}'+
   '.bc-anno-ft-i:hover{color:#111;background:#F5F1EC;}'+
   '.bc-anno-gate{padding:18px 16px;}'+
+  '.bc-anno-sbs{flex:none;display:flex;align-items:center;gap:6px;padding:8px 12px;background:#fff;border-bottom:1px solid #EBE7E1;}'+
+  '.bc-anno-sbs.bc-hide{display:none;}'+
+  '.bc-anno-sbs button{font-size:11px;padding:5px 10px;border-radius:999px;border:none;background:#F5F1EC;color:#626260;cursor:pointer;font-weight:600;}'+
+  '.bc-anno-sbs button:hover{background:#EBE7E1;}'+
+  '.bc-anno-sbs button.bc-on{background:#111;color:#fff;}'+
+  '.bc-anno-sbsn{margin-left:auto;min-width:0;font-size:11px;color:#7B7B78;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}'+
+  '.bc-anno-item.bc-anno-foreign{background:#fff;border:1px solid #EBE7E1;}'+
+  '.bc-anno-item.bc-anno-foreign:hover{background:#F9F7F4;}'+
+  '.bc-anno-src{font-size:11px;font-weight:600;color:#0007CB;margin:0 0 4px;word-break:break-word;}'+
+  '.bc-anno-hint{font-size:11px;color:#7B7B78;margin-top:10px;}'+
   '.bc-anno-gate p{margin:0 0 10px;font-size:13px;color:#626260;}'+
   '.bc-anno-gate input{width:100%;box-sizing:border-box;border:none;border-radius:12px;padding:10px 12px;font:13px/1.5 inherit;background:#F5F1EC;}'+
   '.bc-anno-gate button{margin-top:12px;background:#FF5600;color:#fff;border:none;border-radius:999px;padding:9px 16px;font-weight:700;cursor:pointer;}'+
@@ -971,6 +1060,11 @@ function buildUI(){
     '</button>'+
     '<button type="button" class="bc-anno-x" data-x>&#10005;</button>'+
   '</div>'+
+  '<div class="bc-anno-sbs'+(API?'':' bc-hide')+'" data-scope-bar>'+
+    '<button type="button" data-scope-page class="bc-on">This page</button>'+
+    '<button type="button" data-scope-all>All pages</button>'+
+    '<span class="bc-anno-sbsn" data-scope-label>'+esc(Model.scopeLabel(scope))+'</span>'+
+  '</div>'+
   '<div class="bc-anno-gate">'+
     '<p>Enter your name before viewing the note list.</p>'+
     '<input type="text" data-name-input placeholder="Display name" maxlength="80">'+
@@ -1002,6 +1096,8 @@ function buildUI(){
 
   sb.querySelector('[data-x]').onclick=closePanel;
   sb.querySelector('[data-tab]').onchange=function(){currentTab=this.value;renderList();};
+  sb.querySelector('[data-scope-page]').onclick=function(){setDisplayMode('page');};
+  sb.querySelector('[data-scope-all]').onclick=function(){setDisplayMode('scope');};
   var sortEl=sb.querySelector('[data-sort]');
   sortEl.value=readPrefs().sort;
   sortEl.onchange=function(){
@@ -1056,72 +1152,145 @@ function syncFabCount(){
   el.classList.add('bc-show');
   fab.setAttribute('aria-label','Open notes, '+n+' open');
 }
+function listEntries(){
+  var out=[], i, j, pages, p, purl, pa;
+  if(displayMode==='scope'&&scopeData){
+    pages=scopeData.pages||[];
+    for(i=0;i<pages.length;i++){
+      p=pages[i]; if(!p) continue;
+      purl=p.url||(p.page&&p.page.url)||'';
+      if(!purl||Model.sameDoc(purl,docKey)) continue;
+      pa=p.annotations||[];
+      for(j=0;j<pa.length;j++){
+        if(pa[j]&&pa[j].id) out.push({a:pa[j],cur:false,url:purl,page:p.page||null});
+      }
+    }
+  }
+  for(i=0;i<annos.length;i++) out.push({a:annos[i],cur:true,url:docKey,page:null});
+  return out;
+}
+function sortEntries(entries, mode){
+  var wrap=[], rank={}, sorted, i;
+  for(i=0;i<entries.length;i++){
+    entries[i].k='k'+i;
+    wrap.push({k:entries[i].k,createdAt:entries[i].a.createdAt,pos:entries[i].a.pos});
+  }
+  sorted=Model.sortAnnos(wrap, mode);
+  for(i=0;i<sorted.length;i++) rank[sorted[i].k]=i;
+  entries.sort(function(x,y){return rank[x.k]-rank[y.k];});
+  return entries;
+}
+function foreignSource(e){
+  var label=Model.pageLabel(e.url, scope);
+  var title=e.page&&e.page.title?String(e.page.title):'';
+  return title?title+' | '+label:label;
+}
+function itemHTML(e, pinNos){
+  var a=e.a, foreign=!e.cur;
+  var q=foreign?'':(a.anchorQ==='anchored'?'<span class="bc-anno-badge bc-anno-ok">anchored</span>'
+        :a.anchorQ==='fuzzy'?'<span class="bc-anno-badge bc-anno-fz">fuzzy</span>'
+        :'<span class="bc-anno-badge bc-anno-or">orphaned</span>');
+  var excerpt=a.kind==='image'?('[Image] '+(a.alt||a.srcNorm||a.src||''))
+        :a.kind==='el'?('['+((a.elTag||'el').charAt(0).toUpperCase()+(a.elTag||'el').slice(1))+'] '+(a.elName||a.exact||''))
+        :(a.exact||'');
+  var pinNo=a.pubId||(foreign?null:(a.kind==='image'?pinNos[a.id]:null));
+  var mine=!foreign&&isMine(a);
+  var replies=a.replies||[];
+  var rh='';
+  if(replies.length){
+    rh='<div class="bc-anno-replies">';
+    replies.forEach(function(r,ri){
+      var rid=r.id||('i'+ri);
+      rh+='<div class="bc-anno-reply">'+
+        '<div class="bc-anno-rt"><span class="bc-anno-ra">'+esc(r.author||'Anonymous')+'</span>: '+esc(r.text||'')+
+        (r.resolved?' <span class="bc-anno-badge bc-anno-ap">resolved</span>':'')+'</div>'+
+        (!foreign&&isMine(r)?'<button data-act="resolve-reply" data-rid="'+esc(rid)+'">'+(r.resolved?'Unresolve':'Resolve')+'</button>':'')+
+        '</div>';
+    });
+    rh+='</div>';
+  }
+  var acts=foreign
+    ? '<div class="bc-anno-hint">Open on page</div>'
+    : '<div class="bc-anno-acts">'+
+        (mine?'<button data-act="edit">Edit</button>':'')+
+        '<button data-act="reply">Reply</button>'+
+        (mine?(currentTab==='open'?'<button data-act="done" class="bc-anno-pri">Done</button>':'<button data-act="reopen" class="bc-anno-pri">Reopen</button>'):'')+
+        (mine?'<button data-act="del" class="bc-anno-dz">Delete</button>':'')+
+      '</div>';
+  return '<div class="bc-anno-item'+(foreign?' bc-anno-foreign':'')+'" data-id="'+esc(a.id)+'"'+
+      (foreign?' data-doc="'+esc(e.url)+'"':'')+'>'+
+      '<div class="bc-anno-who">'+(pinNo?'<span class="bc-anno-pinno">'+esc(pinNo)+'</span>':'')+esc(a.author||'Anonymous')+'</div>'+
+      (foreign?'<div class="bc-anno-src">'+esc(foreignSource(e))+'</div>':'')+
+      (a.breadcrumb&&a.breadcrumb.length?'<div class="bc-anno-crumb">'+esc(a.breadcrumb.join(' > '))+'</div>':'')+
+      '<div class="bc-anno-ex">'+esc(excerpt)+'</div>'+
+      '<div class="bc-anno-cm">'+esc(Model.commentOf(a))+'</div>'+
+      rh+
+      '<div class="bc-anno-mt"><span>'+fmt(a.updatedAt)+((a.edits&&a.edits.length>1)?' | edited '+a.edits.length+' times':'')+'</span>'+q+'</div>'+
+      acts+'</div>';
+}
+function setDisplayMode(mode){
+  mode=(mode==='scope'&&API)?'scope':'page';
+  if(displayMode===mode) return;
+  displayMode=mode;
+  var p=sb.querySelector('[data-scope-page]'), s=sb.querySelector('[data-scope-all]');
+  if(p) p.className=displayMode==='page'?'bc-on':'';
+  if(s) s.className=displayMode==='scope'?'bc-on':'';
+  if(displayMode==='scope') loadScope();
+  renderList();
+}
+function loadScope(){
+  if(!API||scopeData||scopeLoading) return;
+  scopeLoading=true;scopeErr=false;
+  renderList();
+  try{
+    fetch(scopeApiUrl(),{headers:apiHeaders()})
+      .then(function(r){return r.ok?r.json():null;})
+      .then(function(d){if(d&&d.pages) scopeData=d; else scopeErr=true;})
+      .catch(function(){scopeErr=true;})
+      .then(function(){scopeLoading=false;renderList();});
+  }catch(x){scopeLoading=false;scopeErr=true;renderList();}
+}
 function renderList(){
   if(!sb) return;
   syncGate();
   syncFabCount();
   if(!readPrefs().displayName) return;
   var list=sb.querySelector('.bc-anno-list');
-  var items=annos.filter(function(a){return currentTab==='open'?a.status!=='done':a.status==='done';});
-  items=Model.sortAnnos(items, readPrefs().sort);
-  var nOpen=annos.filter(function(a){return a.status!=='done';}).length;
-  var nDone=annos.filter(function(a){return a.status==='done';}).length;
+  var all=listEntries(), entries=[], i, nOpen=0, nDone=0;
+  for(i=0;i<all.length;i++){
+    if(all[i].a.status==='done') nDone++; else nOpen++;
+    if(currentTab==='open'?all[i].a.status!=='done':all[i].a.status==='done') entries.push(all[i]);
+  }
+  sortEntries(entries, readPrefs().sort);
   var tabEl=sb.querySelector('[data-tab]');
   if(tabEl&&tabEl.options.length>=2){
     tabEl.options[0].text='Open ('+nOpen+')';
     tabEl.options[1].text='Done ('+nDone+')';
     tabEl.value=currentTab;
   }
-  if(!items.length){
-    list.innerHTML='<div class="bc-anno-empty">'+(currentTab==='open'?'No notes yet.<br>Select text, Pin a control, or click an image to add one.':'No completed notes.')+'</div>';
+  if(displayMode==='scope'&&!scopeData){
+    list.innerHTML='<div class="bc-anno-empty">'+(scopeErr?'Could not load notes from this section.':'Loading notes from this section...')+'</div>';
+    return;
+  }
+  if(!entries.length){
+    list.innerHTML='<div class="bc-anno-empty">'+(displayMode==='scope'
+      ?(currentTab==='open'?'No open notes in this section.':'No completed notes in this section.')
+      :(currentTab==='open'?'No notes yet.<br>Select text, Pin a control, or click an image to add one.':'No completed notes.'))+'</div>';
     return;
   }
   var html='', keepBottom=readPrefs().sort==='createdAsc';
   var pinNos=Model.imagePinNumbers(annos);
-  items.forEach(function(a){
-    var q=a.anchorQ==='anchored'?'<span class="bc-anno-badge bc-anno-ok">anchored</span>'
-          :a.anchorQ==='fuzzy'?'<span class="bc-anno-badge bc-anno-fz">fuzzy</span>'
-          :'<span class="bc-anno-badge bc-anno-or">orphaned</span>';
-    var excerpt=a.kind==='image'?('[Image] '+(a.alt||a.srcNorm||a.src||''))
-          :a.kind==='el'?('['+((a.elTag||'el').charAt(0).toUpperCase()+(a.elTag||'el').slice(1))+'] '+(a.elName||a.exact||''))
-          :(a.exact||'');
-    var pinNo=a.pubId||(a.kind==='image'?pinNos[a.id]:null);
-    var mine=isMine(a);
-    var replies=a.replies||[];
-    var rh='';
-    if(replies.length){
-      rh='<div class="bc-anno-replies">';
-      replies.forEach(function(r,ri){
-        var rid=r.id||('i'+ri);
-        rh+='<div class="bc-anno-reply">'+
-          '<div class="bc-anno-rt"><span class="bc-anno-ra">'+esc(r.author||'Anonymous')+'</span>: '+esc(r.text||'')+
-          (r.resolved?' <span class="bc-anno-badge bc-anno-ap">resolved</span>':'')+'</div>'+
-          (isMine(r)?'<button data-act="resolve-reply" data-rid="'+esc(rid)+'">'+(r.resolved?'Unresolve':'Resolve')+'</button>':'')+
-          '</div>';
-      });
-      rh+='</div>';
-    }
-    html+='<div class="bc-anno-item" data-id="'+a.id+'">'+
-      '<div class="bc-anno-who">'+(pinNo?'<span class="bc-anno-pinno">'+esc(pinNo)+'</span>':'')+esc(a.author||'Anonymous')+'</div>'+
-      (a.breadcrumb&&a.breadcrumb.length?'<div class="bc-anno-crumb">'+esc(a.breadcrumb.join(' > '))+'</div>':'')+
-      '<div class="bc-anno-ex">'+esc(excerpt)+'</div>'+
-      '<div class="bc-anno-cm">'+esc(Model.commentOf(a))+'</div>'+
-      rh+
-      '<div class="bc-anno-mt"><span>'+fmt(a.updatedAt)+((a.edits&&a.edits.length>1)?' | edited '+a.edits.length+' times':'')+'</span>'+q+'</div>'+
-      '<div class="bc-anno-acts">'+
-        (mine?'<button data-act="edit">Edit</button>':'')+
-        '<button data-act="reply">Reply</button>'+
-        (mine?(currentTab==='open'?'<button data-act="done" class="bc-anno-pri">Done</button>':'<button data-act="reopen" class="bc-anno-pri">Reopen</button>'):'')+
-        (mine?'<button data-act="del" class="bc-anno-dz">Delete</button>':'')+
-      '</div></div>';});
-  var prev=list.scrollTop, max=list.scrollHeight;
+  entries.forEach(function(e){html+=itemHTML(e,pinNos);});
+  var prev=list.scrollTop;
   list.innerHTML=html;
   if(keepBottom) list.scrollTop=list.scrollHeight;
   else list.scrollTop=prev;
   list.querySelectorAll('.bc-anno-item').forEach(function(el){
     var id=el.getAttribute('data-id');
+    var doc=el.getAttribute('data-doc');
     el.addEventListener('click',function(ev){
       var b=ev.target.closest('button');
+      if(doc){if(!b) openForeign(doc,id);return;}
       if(!b){jump(id);return;}
       var act=b.getAttribute('data-act');
       var a=annos.find(function(x){return x.id===id;});if(!a)return;
@@ -1202,6 +1371,25 @@ function jump(id){
   }
 }
 function flashEl(el){el.classList.add('bc-flash');setTimeout(function(){el.classList.remove('bc-flash');},1300);}
+function openForeign(url,id){
+  if(!url) return;
+  try{sessionStorage.setItem(jumpKey(url),String(id));}catch(x){}
+  location.assign(url);
+}
+function consumePendingJump(){
+  var id=null, i;
+  try{id=sessionStorage.getItem(jumpKey(docKey));}catch(x){}
+  if(!id) return;
+  try{sessionStorage.removeItem(jumpKey(docKey));}catch(x){}
+  for(i=0;i<annos.length;i++){
+    if(annos[i].id!==id) continue;
+    openPanel();
+    var item=sb.querySelector('.bc-anno-item[data-id="'+id+'"]');
+    if(item) item.scrollIntoView({block:'nearest'});
+    jump(id);
+    return;
+  }
+}
 
 function hidePopovers(){
   if(selButton){selButton.remove();selButton=null;}
@@ -1530,14 +1718,14 @@ function loadLocal(){
 }
 function loadAll(){
   loadLocal();
-  if(!API){refresh();return;}
+  if(!API){refresh();consumePendingJump();return;}
   var ctl=('AbortController'in window)?new AbortController():null;
   if(ctl) setTimeout(function(){ctl.abort();},2500);
   try{fetch(apiUrl(),ctl?{signal:ctl.signal,headers:apiHeaders()}:{headers:apiHeaders()})
     .then(function(r){return r.ok?r.json():null;})
     .then(function(d){if(d) ingestDoc(d);})
     .catch(function(){})
-    .then(function(){refresh();});}catch(x){refresh();}
+    .then(function(){refresh();consumePendingJump();});}catch(x){refresh();consumePendingJump();}
 }
 function downloadBlob(name, text, mime){
   var blob=new Blob([text],{type:mime});
